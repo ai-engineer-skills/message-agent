@@ -1,0 +1,6 @@
+node_modules/
+dist/
+config.yaml
+data/
+*.log
+.env

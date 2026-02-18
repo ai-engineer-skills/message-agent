@@ -1,0 +1,64 @@
+# Message Agent Host - Example Configuration
+
+persona:
+  name: Assistant
+  systemPrompt: |
+    You are a helpful AI assistant connected to multiple messaging platforms.
+    Be concise and helpful. Use markdown formatting when appropriate.
+
+llm:
+  provider: direct-api          # direct-api | copilot | claude-code
+  model: gpt-4o
+  apiKey: ${LLM_API_KEY}
+  baseUrl: https://api.openai.com/v1
+  maxTokens: 4096
+
+channels:
+  my-telegram:
+    type: telegram
+    enabled: true
+    token: ${TELEGRAM_BOT_TOKEN}
+
+  # my-whatsapp:
+  #   type: whatsapp
+  #   enabled: false
+  #   sessionDataPath: ./data/whatsapp-session
+
+  # my-wechat:
+  #   type: wechat
+  #   enabled: false
+  #   puppetProvider: wechaty-puppet-wechat4u
+
+  # my-imessage:
+  #   type: imessage
+  #   enabled: false
+
+mcp:
+  servers: {}
+  # Example:
+  # deep-research:
+  #   command: node
+  #   args: [./path/to/mcp-server.js]
+  #   env:
+  #     API_KEY: ${RESEARCH_API_KEY}
+
+verification:
+  enabled: true
+  maxRetries: 3
+  confidenceThreshold: 0.7
+  skipForShortResponses: true
+  shortResponseThreshold: 50
+  llmReview:
+    enabled: true
+    # provider: copilot           # Can use a different provider for review
+    # model: gpt-4o-mini          # Can use a cheaper model
+  rules:
+    enabled: true
+
+skills:
+  directories: []
+  # - ./my-custom-skills
+
+history:
+  dataDir: ./data/history
+  maxMessages: 100

@@ -1,0 +1,3 @@
+[submodule "vendor/ai-engineer-skills"]
+	path = vendor/ai-engineer-skills
+	url = https://github.com/ai-engineer-skills/ai-engineer-skills.git

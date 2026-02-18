@@ -1,0 +1,25 @@
+{
+  "name": "message-agent-host",
+  "version": "1.0.0",
+  "description": "Multi-channel message agent host with pluggable LLM backends, MCP tools, and verification",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "agent-toolkit": "file:../agent-toolkit",
+    "telegraf": "^4.16.0",
+    "wechaty": "^1.20.0",
+    "whatsapp-web.js": "^1.26.0",
+    "yaml": "^2.4.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}
