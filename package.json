@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "agent-toolkit": "github:ai-engineer-skills/agent-toolkit",
+    "agent-toolkit": "https://github.com/ai-engineer-skills/agent-toolkit.git",
     "telegraf": "^4.16.0",
     "wechaty": "^1.20.0",
     "whatsapp-web.js": "^1.26.0",
