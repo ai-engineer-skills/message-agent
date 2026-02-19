@@ -295,11 +295,10 @@ async function main(): Promise<void> {
     taskPersistence,
   );
 
-  // Wire message handler and connect channels
+  // Wire message handler
   channelManager.setHandler((msg) => agentService.handleMessage(msg));
-  await channelManager.connectAll();
 
-  // ─── Web Server ───────────────────────────────────────────────────────────────
+  // ─── Web Server (start before connectAll so UI is available immediately) ─────
   let webServer: WebServer | undefined;
   if (webEnabled && webChannel && sseManager) {
     const webPort = config.web?.port ?? 3000;
@@ -315,6 +314,9 @@ async function main(): Promise<void> {
     });
     await webServer.start();
   }
+
+  // Connect external channels (may block if a channel is slow to connect)
+  await channelManager.connectAll();
 
   // ─── Task Recovery ──────────────────────────────────────────────────────────
   if (config.taskPersistence?.recoverOnStartup ?? true) {
