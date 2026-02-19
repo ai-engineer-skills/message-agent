@@ -62,3 +62,25 @@ skills:
 history:
   dataDir: ./data/history
   maxMessages: 100
+
+# Health monitoring & self-recovery
+health:
+  heartbeatIntervalMs: 10000         # Write heartbeat to disk every 10s
+  heartbeatFile: ./data/heartbeat.json
+  httpPort: 3001                     # HTTP /health endpoint port
+  httpEnabled: true
+  channelCheckIntervalMs: 30000      # Check channel health every 30s
+  reconnectBaseDelayMs: 2000         # Initial reconnect delay (doubles per failure)
+  reconnectMaxDelayMs: 120000        # Max reconnect backoff: 2 minutes
+  maxReconnectAttempts: 10           # Give up after 10 consecutive failures
+
+# To enable external watchdog supervision, run:
+#   npm run start:watchdog
+#
+# Watchdog environment variables:
+#   HEARTBEAT_FILE=./data/heartbeat.json
+#   HEARTBEAT_TIMEOUT=60             # Restart if no heartbeat for 60s
+#   CHECK_INTERVAL=15                # Check every 15s
+#   HOST_COMMAND=node dist/index.js
+#   MAX_RESTARTS=5                   # Max 5 restarts per window
+#   RESTART_WINDOW=300               # 5-minute window

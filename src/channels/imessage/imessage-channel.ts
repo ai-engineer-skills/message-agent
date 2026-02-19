@@ -77,6 +77,7 @@ export class IMessageChannel extends BaseChannel {
           senderId: 'unknown',
           text: result.trim(),
           timestamp: Date.now(),
+          platformMessageId: undefined,
         };
         await this.handler(msg);
       }

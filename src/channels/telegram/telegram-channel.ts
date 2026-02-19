@@ -29,6 +29,7 @@ export class TelegramChannel extends BaseChannel {
           (ctx.from.last_name ? ` ${ctx.from.last_name}` : ''),
         text: ctx.message.text,
         timestamp: ctx.message.date * 1000,
+        platformMessageId: String(ctx.message.message_id),
         raw: ctx.message,
       };
 
@@ -53,9 +54,15 @@ export class TelegramChannel extends BaseChannel {
     conversationId: string,
     message: OutgoingMessage,
   ): Promise<void> {
-    await this.bot.telegram.sendMessage(conversationId, message.text, {
+    const options: Record<string, unknown> = {
       parse_mode: 'Markdown',
-    });
+    };
+    if (message.replyToMessageId) {
+      options.reply_parameters = {
+        message_id: Number(message.replyToMessageId),
+      };
+    }
+    await this.bot.telegram.sendMessage(conversationId, message.text, options);
   }
 
   async sendTypingIndicator(conversationId: string): Promise<void> {

@@ -6,6 +6,10 @@ export interface HostConfig {
   verification: VerificationConfig;
   skills?: SkillsConfig;
   history?: HistoryConfig;
+  health?: HealthConfig;
+  journal?: JournalConfig;
+  taskPersistence?: TaskPersistenceConfig;
+  web?: WebConfig;
 }
 
 export interface PersonaConfig {
@@ -23,7 +27,7 @@ export interface LlmConfig {
 }
 
 export interface ChannelConfig {
-  type: 'telegram' | 'whatsapp' | 'wechat' | 'imessage';
+  type: 'telegram' | 'whatsapp' | 'wechat' | 'imessage' | 'web';
   enabled: boolean;
   token?: string;
   sessionDataPath?: string;
@@ -65,4 +69,46 @@ export interface SkillsConfig {
 export interface HistoryConfig {
   dataDir?: string;
   maxMessages?: number;
+  maxSegmentSizeBytes?: number;
+  maxSegments?: number;
+}
+
+export interface HealthConfig {
+  /** Heartbeat write interval in ms. Default: 10_000 */
+  heartbeatIntervalMs?: number;
+  /** Path to heartbeat file. Default: <DATA_ROOT>/health/heartbeat.json */
+  heartbeatFile?: string;
+  /** HTTP health endpoint port. Default: 3001 */
+  httpPort?: number;
+  /** Whether to enable the HTTP health endpoint. Default: true */
+  httpEnabled?: boolean;
+  /** Channel health check interval in ms. Default: 30_000 */
+  channelCheckIntervalMs?: number;
+  /** Initial reconnect delay in ms. Default: 2_000 */
+  reconnectBaseDelayMs?: number;
+  /** Max reconnect delay after backoff in ms. Default: 120_000 */
+  reconnectMaxDelayMs?: number;
+  /** Max consecutive reconnect attempts. Default: 10 */
+  maxReconnectAttempts?: number;
+  /** Path to the recovery event file written by the watchdog. Default: <DATA_ROOT>/health/recovery-event.json */
+  recoveryEventFile?: string;
+  /** Conversations to notify on recovery. Format: ["channelId:conversationId", ...] */
+  notifyOnRecovery?: string[];
+}
+
+export interface JournalConfig {
+  enabled?: boolean;
+  maxSegmentSizeBytes?: number;
+  maxSegments?: number;
+}
+
+export interface TaskPersistenceConfig {
+  enabled?: boolean;
+  completedRetentionDays?: number;
+  recoverOnStartup?: boolean;
+}
+
+export interface WebConfig {
+  enabled?: boolean;
+  port?: number;
 }

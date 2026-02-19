@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+import { join } from 'node:path';
 import { createLogger, setLogLevel } from 'agent-toolkit/logger';
 import { CopilotLLMProvider } from 'agent-toolkit/services/llm-backends/copilot';
 import { DirectAPILLMProvider } from 'agent-toolkit/services/llm-backends/direct-api';
@@ -16,9 +18,38 @@ import { WhatsAppChannel } from './channels/whatsapp/whatsapp-channel.js';
 import { WeChatChannel } from './channels/wechat/wechat-channel.js';
 import { IMessageChannel } from './channels/imessage/imessage-channel.js';
 import { AgentService } from './agent/agent-service.js';
+import { TaskManager } from './concurrency/task-manager.js';
+import { HeartbeatService, ChannelMonitor, RecoveryNotifier } from './health/index.js';
 import { LLMCompletionResult } from 'agent-toolkit/services/llm-provider';
+import { getDataRoot } from './storage/paths.js';
+import { JournalWriter } from './storage/journal-writer.js';
+import { TaskPersistence } from './storage/task-persistence.js';
+import { TaskRecoveryService } from './storage/task-recovery.js';
+import { migrateOldHistory } from './storage/migrator.js';
+import { SSEManager } from './web/sse-manager.js';
+import { WebChannel } from './channels/web/web-channel.js';
+import { WebServer } from './web/web-server.js';
 
 const log = createLogger('main');
+
+// ─── Global error boundaries ────────────────────────────────────────────────────
+// Prevent unhandled errors from crashing the entire process.
+// The watchdog monitors the heartbeat; if a fatal loop occurs the
+// heartbeat goes stale and the watchdog restarts us.
+
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught exception (process NOT exiting)', {
+    error: String(err),
+    stack: err.stack,
+  });
+});
+
+process.on('unhandledRejection', (reason) => {
+  log.error('Unhandled rejection (process NOT exiting)', {
+    reason: String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
 
 /**
  * Wraps a base LLMProvider (from submodule, which only has complete())
@@ -98,6 +129,18 @@ async function main(): Promise<void> {
   const config = loadConfig(configPath);
   log.info('Config loaded', { persona: config.persona.name });
 
+  // ─── Data root ──────────────────────────────────────────────────────────────
+  const dataRoot = getDataRoot();
+  log.info('Data root', { path: dataRoot });
+
+  const historyDir = config.history?.dataDir ?? join(dataRoot, 'history');
+  const journalDir = join(dataRoot, 'journal');
+  const tasksDir = join(dataRoot, 'tasks');
+  const healthDir = join(dataRoot, 'health');
+
+  // ─── Migration ──────────────────────────────────────────────────────────────
+  migrateOldHistory('./data/history', historyDir);
+
   // Initialize LLM provider
   let provider: ExtendedLLMProvider;
   switch (config.llm.provider) {
@@ -168,14 +211,33 @@ async function main(): Promise<void> {
   loadAllSkills(skillRegistry, config.skills?.directories);
   log.info('Skills loaded', { count: skillRegistry.getAll().length });
 
-  // History
+  // History (JSONL segments)
   const historyStore = new FileHistoryStore(
-    config.history?.dataDir,
+    historyDir,
     config.history?.maxMessages,
+    config.history?.maxSegmentSizeBytes,
+    config.history?.maxSegments,
   );
+
+  // Journal
+  const journal = new JournalWriter({
+    enabled: config.journal?.enabled ?? true,
+    journalDir,
+    maxSegmentSizeBytes: config.journal?.maxSegmentSizeBytes,
+    maxSegments: config.journal?.maxSegments,
+  });
+
+  // Task persistence
+  const taskPersistence = new TaskPersistence({
+    tasksDir,
+    enabled: config.taskPersistence?.enabled ?? true,
+  });
 
   // Channels
   const channelManager = new ChannelManager();
+  let sseManager: SSEManager | undefined;
+  let webChannel: WebChannel | undefined;
+
   for (const [id, channelConfig] of Object.entries(config.channels)) {
     if (!channelConfig.enabled) continue;
 
@@ -205,6 +267,20 @@ async function main(): Promise<void> {
     }
   }
 
+  // ─── Web Channel ────────────────────────────────────────────────────────────
+  const webEnabled = config.web?.enabled ?? true;
+  if (webEnabled) {
+    sseManager = new SSEManager();
+    webChannel = new WebChannel('web', sseManager);
+    channelManager.register(webChannel);
+  }
+
+  // ─── TaskManager (external — shared with WebServer) ─────────────────────────
+  const taskManager = new TaskManager(
+    (id) => channelManager.getChannel(id),
+    taskPersistence,
+  );
+
   // Agent
   const agentService = new AgentService(
     config,
@@ -213,18 +289,86 @@ async function main(): Promise<void> {
     skillRegistry,
     historyStore,
     channelManager,
+    taskManager,
     reviewLlmService,
+    journal,
+    taskPersistence,
   );
 
   // Wire message handler and connect channels
   channelManager.setHandler((msg) => agentService.handleMessage(msg));
   await channelManager.connectAll();
 
-  log.info('Message Agent Host started', { persona: config.persona.name });
+  // ─── Web Server ───────────────────────────────────────────────────────────────
+  let webServer: WebServer | undefined;
+  if (webEnabled && webChannel && sseManager) {
+    const webPort = config.web?.port ?? 3000;
+    webServer = new WebServer(webPort, {
+      webChannel,
+      sseManager,
+      historyStore,
+      channelManager,
+      taskManager,
+      taskPersistence,
+      dataRoot,
+      personaName: config.persona.name,
+    });
+    await webServer.start();
+  }
+
+  // ─── Task Recovery ──────────────────────────────────────────────────────────
+  if (config.taskPersistence?.recoverOnStartup ?? true) {
+    const recoveryService = new TaskRecoveryService(
+      channelManager,
+      taskPersistence,
+      journal,
+    );
+    await recoveryService.recover();
+  }
+
+  // ─── Health infrastructure ──────────────────────────────────────────────────
+
+  // 1. Heartbeat — writes periodic pulse to disk + HTTP /health endpoint
+  //    The external watchdog reads the heartbeat file; if stale → restart.
+  const heartbeat = new HeartbeatService({
+    intervalMs: config.health?.heartbeatIntervalMs ?? 10_000,
+    filePath: config.health?.heartbeatFile ?? join(healthDir, 'heartbeat.json'),
+    httpPort: config.health?.httpPort ?? 3001,
+    httpEnabled: config.health?.httpEnabled ?? true,
+  });
+  heartbeat.setChannelStatusProvider(() => channelManager.getAllStatuses());
+  await heartbeat.start();
+
+  // 2. Channel monitor — detects dead channels and reconnects with backoff
+  const channelMonitor = new ChannelMonitor(channelManager, {
+    checkIntervalMs: config.health?.channelCheckIntervalMs ?? 30_000,
+    reconnectBaseDelayMs: config.health?.reconnectBaseDelayMs ?? 2_000,
+    reconnectMaxDelayMs: config.health?.reconnectMaxDelayMs ?? 120_000,
+    maxReconnectAttempts: config.health?.maxReconnectAttempts ?? 10,
+  });
+  channelMonitor.start();
+
+  // 3. Recovery notifier — if the watchdog restarted us, notify configured conversations
+  const recoveryNotifier = new RecoveryNotifier(
+    channelManager,
+    config.health?.recoveryEventFile ?? join(healthDir, 'recovery-event.json'),
+    config.health?.notifyOnRecovery ?? [],
+  );
+  await recoveryNotifier.checkAndNotify();
+
+  log.info('Message Agent Host started', {
+    persona: config.persona.name,
+    dataRoot,
+    healthEndpoint: `http://localhost:${config.health?.httpPort ?? 3001}/health`,
+    webUI: webEnabled ? `http://localhost:${config.web?.port ?? 3000}` : 'disabled',
+  });
 
   // Graceful shutdown
   const shutdown = async () => {
     log.info('Shutting down...');
+    channelMonitor.stop();
+    await heartbeat.stop();
+    if (webServer) await webServer.stop();
     await channelManager.disconnectAll();
     await mcpManager.disconnectAll();
     await llmService.dispose();
@@ -237,6 +381,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log.error('Fatal error', { error: String(err) });
+  log.error('Fatal startup error', { error: String(err) });
   process.exit(1);
 });

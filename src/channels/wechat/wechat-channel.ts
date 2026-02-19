@@ -62,6 +62,7 @@ export class WeChatChannel extends BaseChannel {
         senderName: talker.name(),
         text: message.text() ?? '',
         timestamp: message.date().getTime(),
+        platformMessageId: message.id,
         raw: message,
       };
 

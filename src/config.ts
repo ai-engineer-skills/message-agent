@@ -47,6 +47,10 @@ export function loadConfig(path: string): HostConfig {
     },
     skills: parsed.skills as HostConfig['skills'],
     history: parsed.history as HostConfig['history'],
+    health: parsed.health as HostConfig['health'],
+    journal: parsed.journal as HostConfig['journal'],
+    taskPersistence: parsed.taskPersistence as HostConfig['taskPersistence'],
+    web: parsed.web as HostConfig['web'],
   };
 
   return config;

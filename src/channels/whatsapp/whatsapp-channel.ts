@@ -53,6 +53,7 @@ export class WhatsAppChannel extends BaseChannel {
         senderName: waMsg._data?.notifyName,
         text: waMsg.body ?? '',
         timestamp: waMsg.timestamp * 1000,
+        platformMessageId: waMsg.id?._serialized ?? waMsg.id?.id,
         raw: waMsg,
       };
 
@@ -83,7 +84,11 @@ export class WhatsAppChannel extends BaseChannel {
     message: OutgoingMessage,
   ): Promise<void> {
     if (!this.client) throw new Error('WhatsApp client not connected');
-    await this.client.sendMessage(conversationId, message.text);
+    const options: Record<string, unknown> = {};
+    if (message.replyToMessageId) {
+      options.quotedMessageId = message.replyToMessageId;
+    }
+    await this.client.sendMessage(conversationId, message.text, options);
   }
 
   async sendTypingIndicator(conversationId: string): Promise<void> {

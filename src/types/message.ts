@@ -14,6 +14,7 @@ export interface NormalizedMessage {
   senderName?: string;
   text: string;
   timestamp: number;
+  platformMessageId?: string;
   attachments?: MessageAttachment[];
   raw?: unknown;
 }

@@ -1,5 +1,5 @@
 import { createLogger } from 'agent-toolkit/logger';
-import { NormalizedMessage, OutgoingMessage } from '../types/message.js';
+import { NormalizedMessage } from '../types/message.js';
 import { HostConfig, VerificationConfig } from '../types/config.js';
 import { ExtendedLLMService } from '../llm/llm-service.js';
 import { ChatMessage, ToolDefinition } from '../llm/llm-provider.js';
@@ -8,6 +8,8 @@ import { SkillHandler } from '../skills/skill-handler.js';
 import { SkillRegistry } from '../skills/skill-registry.js';
 import { HistoryStore } from '../history/history-store.js';
 import { ChannelManager } from '../channels/channel-manager.js';
+import { TaskManager } from '../concurrency/task-manager.js';
+import { ConversationMutex } from '../concurrency/conversation-mutex.js';
 import {
   Verifier,
   CompositeVerifier,
@@ -16,6 +18,8 @@ import {
 import { RuleVerifier } from './verification/rule-verifier.js';
 import { LLMVerifier } from './verification/llm-verifier.js';
 import { getBuiltinRules } from './verification/rules/index.js';
+import { JournalWriter } from '../storage/journal-writer.js';
+import { TaskPersistence } from '../storage/task-persistence.js';
 
 const log = createLogger('agent');
 
@@ -24,6 +28,10 @@ export class AgentService {
   private verifier: Verifier;
   private verificationConfig: VerificationConfig;
   private lastResponses = new Map<string, string>();
+  private taskManager: TaskManager;
+  private historyMutex = new ConversationMutex();
+  private journal: JournalWriter | undefined;
+  private taskPersistence: TaskPersistence | undefined;
 
   constructor(
     private config: HostConfig,
@@ -32,10 +40,16 @@ export class AgentService {
     private skillRegistry: SkillRegistry,
     private historyStore: HistoryStore,
     private channelManager: ChannelManager,
+    taskManager: TaskManager,
     reviewLlmService?: ExtendedLLMService,
+    journal?: JournalWriter,
+    taskPersistence?: TaskPersistence,
   ) {
     this.skillHandler = new SkillHandler(skillRegistry);
     this.verificationConfig = config.verification;
+    this.journal = journal;
+    this.taskPersistence = taskPersistence;
+    this.taskManager = taskManager;
 
     // Build composite verifier
     const verifiers: Verifier[] = [];
@@ -90,11 +104,24 @@ export class AgentService {
     if (statusDef) {
       statusDef.execute = async () => {
         const statuses = this.channelManager.getAllStatuses();
-        const lines = statuses.map(
+        const channelLines = statuses.map(
           (s) => `• ${s.id} (${s.type}): ${s.status}${s.error ? ` — ${s.error}` : ''}`,
         );
+
+        const activeTasks = this.taskManager.getTaskStatus();
+        let taskSection = '';
+        if (activeTasks.length > 0) {
+          const taskLines = activeTasks.map((t) => {
+            const elapsed = Math.round((Date.now() - t.startedAt) / 1000);
+            return `• [${t.status}] ${t.conversationId} — "${t.originalMessage.text.slice(0, 50)}" (${elapsed}s)`;
+          });
+          taskSection = `\n\n**Active Tasks (${activeTasks.length}):**\n${taskLines.join('\n')}`;
+        } else {
+          taskSection = '\n\n**Active Tasks:** None';
+        }
+
         return {
-          text: `**Channel Status:**\n${lines.join('\n')}`,
+          text: `**Channel Status:**\n${channelLines.join('\n')}${taskSection}`,
           handled: true,
         };
       };
@@ -149,7 +176,7 @@ export class AgentService {
       return;
     }
 
-    // Layer 1: Slash command detection
+    // Layer 1: Slash command detection (fast, synchronous — no background needed)
     const dispatch = await this.skillHandler.dispatch(message);
 
     if (dispatch.handled) {
@@ -157,39 +184,79 @@ export class AgentService {
         // Builtin skill with direct result
         await channel.sendMessage(message.conversationId, {
           text: dispatch.result.text,
+          replyToMessageId: message.platformMessageId,
         });
         return;
       }
 
       if (dispatch.instructions) {
-        // SKILL.md-based skill — use instructions as system prompt
-        await channel.sendTypingIndicator(message.conversationId);
-        const result = await this.llmService.complete(
-          dispatch.instructions,
-          message.text,
-        );
-        await channel.sendMessage(message.conversationId, {
-          text: result.content,
+        // SKILL.md-based skill — submit as background task
+        const instructions = dispatch.instructions;
+        this.taskManager.submit(message, async (msg) => {
+          this.journal?.log('skill_dispatched', msg.id, msg.channelId, msg.conversationId, {
+            skill: msg.text.split(' ')[0],
+          });
+          const result = await this.llmService.complete(
+            instructions,
+            msg.text,
+          );
+          await channel.sendMessage(msg.conversationId, {
+            text: result.content,
+            replyToMessageId: msg.platformMessageId,
+          });
         });
         return;
       }
     }
 
-    // Normal LLM conversation pipeline
-    await channel.sendTypingIndicator(message.conversationId);
+    // Normal LLM conversation — submit as background task
+    this.taskManager.submit(message, (msg) => this.runPipeline(msg));
+  }
 
-    // Append user message to history
-    await this.historyStore.addMessage(
-      message.channelId,
-      message.conversationId,
-      { role: 'user', content: message.text },
-    );
+  private async runPipeline(message: NormalizedMessage): Promise<void> {
+    const channel = this.channelManager.getChannel(message.channelId);
+    if (!channel) return;
+
+    const taskId = message.id;
+    const mutexKey = `${message.channelId}:${message.conversationId}`;
+
+    this.journal?.log('pipeline_started', taskId, message.channelId, message.conversationId);
+
+    // Update task phase
+    await this.taskPersistence?.updatePhase(taskId, 'history_written');
+
+    // Append user message to history (mutex-protected)
+    let release = await this.historyMutex.acquire(mutexKey);
+    try {
+      await this.historyStore.addMessage(
+        message.channelId,
+        message.conversationId,
+        { role: 'user', content: message.text },
+        {
+          senderId: message.senderId,
+          platformMessageId: message.platformMessageId,
+        },
+      );
+      this.journal?.log('history_appended', taskId, message.channelId, message.conversationId, {
+        role: 'user',
+      });
+    } finally {
+      release();
+    }
+
+    // Read history snapshot (mutex-protected)
+    let history: ChatMessage[];
+    release = await this.historyMutex.acquire(mutexKey);
+    try {
+      history = await this.historyStore.getMessages(
+        message.channelId,
+        message.conversationId,
+      );
+    } finally {
+      release();
+    }
 
     // Build messages
-    const history = await this.historyStore.getMessages(
-      message.channelId,
-      message.conversationId,
-    );
     const messages: ChatMessage[] = [
       { role: 'system', content: this.config.persona.systemPrompt },
       ...history,
@@ -215,10 +282,19 @@ export class AgentService {
 
     const allTools: ToolDefinition[] = [...tools, ...skillTools];
 
-    // LLM call with tool-use loop
-    let response = await this.runToolLoop(messages, allTools);
+    // LLM call with tool-use loop (no mutex needed — LLM is stateless)
+    await this.taskPersistence?.updatePhase(taskId, 'llm_calling');
+    this.journal?.log('llm_call_started', taskId, message.channelId, message.conversationId);
 
-    // Verification loop
+    const llmStart = Date.now();
+    let response = await this.runToolLoop(messages, allTools, 10, taskId, message.channelId, message.conversationId);
+    const llmDuration = Date.now() - llmStart;
+
+    this.journal?.log('llm_call_completed', taskId, message.channelId, message.conversationId, {
+      durationMs: llmDuration,
+    });
+
+    // Verification loop (no mutex needed)
     const channelConfig = Object.values(this.config.channels).find(
       (c) => c.type === channel.type,
     );
@@ -228,6 +304,9 @@ export class AgentService {
     };
 
     if (this.shouldVerify(message.text, response, verificationConfig)) {
+      await this.taskPersistence?.updatePhase(taskId, 'verifying', { pendingResponse: response });
+      this.journal?.log('verification_started', taskId, message.channelId, message.conversationId);
+
       response = await this.runVerificationLoop(
         message.text,
         response,
@@ -238,25 +317,44 @@ export class AgentService {
       );
     }
 
-    // Save response to history
-    await this.historyStore.addMessage(
-      message.channelId,
-      message.conversationId,
-      { role: 'assistant', content: response },
-    );
+    // Save response to history (mutex-protected)
+    await this.taskPersistence?.updatePhase(taskId, 'responding', { pendingResponse: response });
+
+    release = await this.historyMutex.acquire(mutexKey);
+    try {
+      await this.historyStore.addMessage(
+        message.channelId,
+        message.conversationId,
+        { role: 'assistant', content: response },
+      );
+      this.journal?.log('history_appended', taskId, message.channelId, message.conversationId, {
+        role: 'assistant',
+      });
+    } finally {
+      release();
+    }
 
     // Track last response for /retry
     const key = `${message.channelId}:${message.conversationId}`;
     this.lastResponses.set(key, response);
 
-    // Send response
-    await channel.sendMessage(message.conversationId, { text: response });
+    // Send response with reply-to
+    await channel.sendMessage(message.conversationId, {
+      text: response,
+      replyToMessageId: message.platformMessageId,
+    });
+
+    this.journal?.log('response_sent', taskId, message.channelId, message.conversationId);
+    this.journal?.log('task_completed', taskId, message.channelId, message.conversationId);
   }
 
   private async runToolLoop(
     messages: ChatMessage[],
     tools: ToolDefinition[],
     maxIterations: number = 10,
+    taskId?: string,
+    channelId?: string,
+    conversationId?: string,
   ): Promise<string> {
     let currentMessages = [...messages];
     let iterations = 0;
@@ -290,25 +388,51 @@ export class AgentService {
               /\$ARGUMENTS/g,
               args || '(no arguments)',
             );
+            this.journal?.log('tool_call_started', taskId ?? '', channelId ?? '', conversationId ?? '', {
+              tool: toolCall.name,
+              type: 'skill',
+            });
+            const toolStart = Date.now();
             const skillResult = await this.llmService.complete(
               instructions,
               args,
             );
             toolResult = skillResult.content;
+            this.journal?.log('tool_call_completed', taskId ?? '', channelId ?? '', conversationId ?? '', {
+              tool: toolCall.name,
+              type: 'skill',
+              durationMs: Date.now() - toolStart,
+            });
           } else {
             toolResult = `Skill ${skillName} not found`;
           }
         } else {
           // MCP tool invocation
+          this.journal?.log('tool_call_started', taskId ?? '', channelId ?? '', conversationId ?? '', {
+            tool: toolCall.name,
+            type: 'mcp',
+          });
+          const toolStart = Date.now();
           try {
             toolResult = await this.mcpManager.invokeTool(
               toolCall.name,
               toolCall.arguments,
             );
+            this.journal?.log('tool_call_completed', taskId ?? '', channelId ?? '', conversationId ?? '', {
+              tool: toolCall.name,
+              type: 'mcp',
+              durationMs: Date.now() - toolStart,
+            });
           } catch (err) {
             toolResult = `Tool error: ${String(err)}`;
             log.error('Tool invocation failed', {
               tool: toolCall.name,
+              error: String(err),
+            });
+            this.journal?.log('tool_call_completed', taskId ?? '', channelId ?? '', conversationId ?? '', {
+              tool: toolCall.name,
+              type: 'mcp',
+              durationMs: Date.now() - toolStart,
               error: String(err),
             });
           }
@@ -375,6 +499,13 @@ export class AgentService {
       );
 
       log.info('Verification result', {
+        attempt,
+        rating: result.rating,
+        confidence: result.confidence,
+        passed: result.passed,
+      });
+
+      this.journal?.log('verification_result', '', channelId, conversationId, {
         attempt,
         rating: result.rating,
         confidence: result.confidence,
