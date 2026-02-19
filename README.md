@@ -17,21 +17,25 @@ A multi-channel message agent host with pluggable LLM backends, MCP tool integra
 
 - Node.js >= 18
 
-## Quick Start (One-Line Install from GitHub)
+## Quick Start (Install from GitHub)
 
 ```bash
-npx github:ai-engineer-skills/message-agent setup
+npm install -g github:ai-engineer-skills/message-agent && message-agent setup
 ```
 
-This installs the package, builds it, and runs the interactive setup wizard.
-
-To install globally:
+This installs the package globally from GitHub, auto-builds TypeScript, and launches the interactive setup wizard. After setup, start the agent:
 
 ```bash
-npm install -g github:ai-engineer-skills/message-agent
-message-agent setup
 message-agent
 ```
+
+### Alternative: local install
+
+```bash
+mkdir my-agent && cd my-agent && npm init -y && npm install github:ai-engineer-skills/message-agent && npx message-agent setup
+```
+
+Then start with `npx message-agent`.
 
 ## Local Development
 
