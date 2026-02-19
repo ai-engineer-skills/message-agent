@@ -1,13 +1,10 @@
 {
-  "name": "message-agent-host",
+  "name": "message-agent",
   "version": "1.0.0",
   "description": "Multi-channel message agent host with pluggable LLM backends, MCP tools, and verification",
   "type": "module",
   "main": "dist/index.js",
-  "bin": {
-    "message-agent": "dist/index.js",
-    "message-agent-setup": "dist/setup.js"
-  },
+  "bin": "dist/cli.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",

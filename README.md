@@ -29,7 +29,7 @@ To install globally:
 
 ```bash
 npm install -g github:ai-engineer-skills/message-agent
-message-agent-setup
+message-agent setup
 message-agent
 ```
 
